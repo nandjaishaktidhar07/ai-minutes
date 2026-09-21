@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-Powered Meeting Minutes Generator | Turn conversations into actionable minutes</title>
+    <meta name="description" content="Automate meeting documentation using Speech-to-Text and NLP.">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        primary: {
+                            50: '#eef2ff', 100: '#e0e7ff', 200: '#c7d2fe',
+                            300: '#a5b4fc', 400: '#818cf8', 500: '#6366f1',
+                            600: '#4f46e5', 700: '#4338ca', 800: '#3730a3', 900: '#312e81',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- React 18 development build — clear errors, consistent behaviour -->
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+    <!-- Babel standalone MUST be loaded before any type="text/babel" script tag -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.10/babel.min.js"></script>
+
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; background:#f8fafc; color:#0f172a; }
+        #app-loader {
+            position:fixed; inset:0; z-index:9999;
+            display:flex; align-items:center; justify-content:center;
+            background:#f8fafc; transition:opacity 0.4s ease;
+        }
+        #app-loader.fade-out { opacity:0; pointer-events:none; }
+        ::-webkit-scrollbar { width:6px; height:6px; }
+        ::-webkit-scrollbar-track { background:#f1f5f9; }
+        ::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:9999px; }
+        ::-webkit-scrollbar-thumb:hover { background:#94a3b8; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        @keyframes ping { 75%,100% { transform:scale(2); opacity:0; } }
+        @media print {
+            aside,header,nav,.no-print,button,.sidebar-container,#app-loader { display:none !important; }
+            body { background:white !important; }
+            .print-container { box-shadow:none !important; border:none !important; padding:0 !important; max-width:100% !important; }
+        }
+    </style>
+</head>
+<body class="min-h-screen antialiased text-slate-800 bg-slate-50 selection:bg-indigo-100 selection:text-indigo-900">
+
+    <!-- Loader is OUTSIDE #root so React always gets a clean empty div to mount into -->
+    <div id="app-loader">
+        <div style="text-align:center;padding:2rem;max-width:22rem;">
+            <div style="width:56px;height:56px;border-radius:18px;background:linear-gradient(135deg,#6366f1,#7c3aed);margin:0 auto 1rem;display:flex;align-items:center;justify-content:center;box-shadow:0 10px 30px rgba(99,102,241,0.35);">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 0.9s linear infinite;"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            </div>
+            <h3 style="font-size:1rem;font-weight:700;color:#0f172a;margin:0 0 0.3rem;">AI Meeting Minutes Generator</h3>
+            <p style="font-size:0.72rem;color:#6366f1;font-weight:500;margin:0 0 1rem;">"Turn conversations into clear, structured, actionable minutes."</p>
+            <div style="display:flex;align-items:center;justify-content:center;gap:0.4rem;color:#94a3b8;">
+                <span style="width:7px;height:7px;border-radius:50%;background:#6366f1;display:inline-block;animation:ping 1s cubic-bezier(0,0,0.2,1) infinite;"></span>
+                <span style="font-size:0.7rem;">Initializing Gemini AI &amp; Speech Pipeline...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- #root is intentionally EMPTY — Babel mounts React here on every load/refresh -->
+    <div id="root"></div>
+
+    <!--
+        THE CORRECT Babel Standalone pattern:
+        type="text/babel" tells Babel to fetch + transform + execute app.js.
+        Works reliably on EVERY page load and F5 refresh. No fetch/eval hacks.
+    -->
+    <script type="text/babel" src="app.js" data-presets="react"></script>
+
+</body>
+</html>

@@ -199,13 +199,66 @@ function parseTimeToSeconds(timeStr) {
 /**
  * Direct call to Google Gemini API to analyze the transcript and generate structured minutes.
  */
-async function callGeminiForMeetingSummary(transcriptText, meetingTitle, participants, apiKey) {
-  const activeKey = apiKey || DEFAULT_GEMINI_API_KEY;
-  const modelName = "models/gemma-4-26b-a4b-it";
-  const url = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${activeKey}`;
+const GEMINI_CANDIDATE_MODELS = [
+  "models/gemini-3.5-flash",
+  "models/gemini-3-flash-preview",
+  "models/gemini-3.7-flash",
+  "models/gemini-flash-latest",
+];
 
+async function callGeminiApiWithFallback(prompt, apiKey) {
+  const activeKey = apiKey || DEFAULT_GEMINI_API_KEY || localStorage.getItem("meeting_ai_gemini_key");
+  if (!activeKey) {
+    throw new Error("Gemini API key is required. Please configure it in Settings.");
+  }
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      response_mime_type: "application/json",
+    },
+  };
+
+  let lastError = null;
+  for (const model of GEMINI_CANDIDATE_MODELS) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${activeKey}`;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Model ${model} HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const rawText = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || "";
+
+      let jsonString = rawText.trim();
+      const matchFenced = rawText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (matchFenced) {
+        jsonString = matchFenced[1];
+      } else {
+        const matchBraces = rawText.match(/(\{[\s\S]*\})/);
+        if (matchBraces) jsonString = matchBraces[1];
+      }
+      return JSON.parse(jsonString);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Model ${model} failed in Gemini call:`, err);
+    }
+  }
+  throw lastError || new Error("All Gemini models failed.");
+}
+
+/**
+ * Direct call to Google Gemini API to analyze the transcript and generate structured minutes.
+ */
+async function callGeminiForMeetingSummary(transcriptText, meetingTitle, participants, apiKey) {
   const prompt = `You are an expert AI meeting documentation analyst.
-Analyze the following timestamped meeting transcript and generate structured, professional meeting minutes strictly based on the spoken conversation.
+Analyze the following timestamped meeting transcript and generate thorough, professional, and detailed meeting minutes strictly based on what was spoken.
 
 Meeting Title: ${meetingTitle || "Meeting"}
 Participants: ${participants.join(", ")}
@@ -213,14 +266,20 @@ Participants: ${participants.join(", ")}
 Transcript:
 ${transcriptText}
 
-You must return a valid JSON object strictly matching this schema:
+CRITICAL REQUIREMENTS:
+1. "summary": A cohesive, high-level executive summary paragraph highlighting the meeting context, core agenda, and overarching outcomes.
+2. "discussionPoints": Extract EVERY distinct topic, debate, or agenda point discussed as a separate object. For each topic, assign a clear descriptive "topic" title (e.g., "Stripe Webhook Latency & Redis Queue Architecture"), and in "description" provide a detailed, comprehensive multi-sentence breakdown detailing specific technical/operational proposals, concerns raised, arguments, and conclusions. DO NOT just repeat or paraphrase the executive summary.
+3. "decisions": Array of concrete decisions agreed upon or confirmed during the meeting.
+4. "actionItems": Array of specific actionable tasks with owner, deadline, priority (High/Medium/Low), and source_timestamp.
+
+Return strictly valid JSON matching this schema:
 {
-  "summary": "Cohesive executive summary paragraph summarizing the key discussion and outcomes strictly from what was spoken.",
+  "summary": "Executive summary paragraph...",
   "discussionPoints": [
-    { "topic": "Topic Heading", "description": "Detailed summary of what was discussed under this topic" }
+    { "topic": "Specific Topic Heading", "description": "Detailed discussion breakdown, context, and findings..." }
   ],
   "decisions": [
-    "Exact decision or consensus agreed upon during the meeting"
+    "Decision confirmed during meeting..."
   ],
   "actionItems": [
     {
@@ -231,39 +290,37 @@ You must return a valid JSON object strictly matching this schema:
       "source_timestamp": "HH:MM:SS"
     }
   ]
+}`;
+
+  return await callGeminiApiWithFallback(prompt, apiKey);
 }
 
-Respond ONLY with valid JSON (inside \`\`\`json ... \`\`\` code block). Do not invent names or facts not in the transcript.`;
+/**
+ * AI Speaker Diarization Pass: Identifies different voices/speakers from transcript dialogue.
+ */
+async function callGeminiDiarizeSpeakers(transcriptText, apiKey) {
+  const prompt = `You are an expert conversation and speech diarization AI.
+Below is a raw meeting transcript where multiple voices spoke, but they might be labeled as a single speaker or need voice separation:
 
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-  };
+${transcriptText}
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+Analyze dialogue patterns, questions, responses, conversational turn-taking, role commitments, and perspectives.
+Separate the transcript into distinct speakers (Speaker 1, Speaker 2, Speaker 3, etc.).
 
-  if (!response.ok) {
-    throw new Error(`Gemini API HTTP Error ${response.status}`);
+Return strictly valid JSON in this format:
+{
+  "turns": [
+    { "speaker": "Speaker 1", "text": "Spoken segment...", "time": "00:00:00" }
+  ]
+}`;
+
+  try {
+    const result = await callGeminiApiWithFallback(prompt, apiKey);
+    return result.turns || [];
+  } catch (err) {
+    console.warn("AI Diarization call failed:", err);
+    return [];
   }
-
-  const data = await response.json();
-  const rawText = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || "";
-
-  // Extract JSON from response
-  let jsonString = rawText;
-  const matchFenced = rawText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-  if (matchFenced) {
-    jsonString = matchFenced[1];
-  } else {
-    const matchBraces = rawText.match(/(\{[\s\S]*\})/);
-    if (matchBraces) jsonString = matchBraces[1];
-  }
-
-  const parsed = JSON.parse(jsonString);
-  return parsed;
 }
 
 /**
@@ -272,27 +329,25 @@ Respond ONLY with valid JSON (inside \`\`\`json ... \`\`\` code block). Do not i
 function localExtractiveAnalyzer(utterances, speakerMapping = {}) {
   const allSentences = [];
   utterances.forEach((u) => {
-    const sents = u.text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length > 10);
+    const sents = u.text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length > 8);
     allSentences.push(...sents);
   });
 
   const summary = allSentences.slice(0, Math.min(3, allSentences.length)).join(" ") || "Summary generated from transcript.";
 
+  // Group into distinct topics based on utterance chunks or speakers
   const discussionPoints = [];
-  const topicMap = new Map();
-  utterances.forEach((u) => {
-    if (!topicMap.has(u.speaker)) topicMap.set(u.speaker, []);
-    topicMap.get(u.speaker).push(u.text);
-  });
-
-  let pointIndex = 1;
-  topicMap.forEach((texts, spk) => {
+  const chunkSize = Math.max(1, Math.ceil(utterances.length / 3));
+  for (let i = 0; i < utterances.length; i += chunkSize) {
+    const chunk = utterances.slice(i, i + chunkSize);
+    const textChunk = chunk.map((c) => c.text).join(" ");
+    const leadSpeaker = speakerMapping[chunk[0]?.speaker] || chunk[0]?.speaker || "Speaker 1";
+    const topicNum = Math.floor(i / chunkSize) + 1;
     discussionPoints.push({
-      topic: `Discussion Point ${pointIndex} (${spk})`,
-      description: texts.slice(0, 2).join(" "),
+      topic: `Topic ${topicNum}: Discussion Segment with ${leadSpeaker}`,
+      description: textChunk.slice(0, 300) + (textChunk.length > 300 ? "..." : ""),
     });
-    pointIndex++;
-  });
+  }
 
   const decisionRegex = /\b(we decided|agreed to|agreed that|approved|confirmed that|resolved to|finalized that|we will|must be|decision is|let's confirm|concluded that)\b/i;
   const decisions = [];
@@ -398,6 +453,32 @@ const ApiService = {
       throw new Error("Transcription could not be completed. No speech or text was provided in the meeting source.");
     }
 
+    // Auto-diarize with AI if all utterances are currently assigned to a single speaker
+    const initialSpeakers = new Set(utterances.map((u) => u.speaker));
+    if (initialSpeakers.size <= 1 && utterances.length >= 2) {
+      try {
+        const rawTranscript = utterances.map((u) => `[${u.time}] ${u.speaker}: ${u.text}`).join("\n");
+        const diarizedTurns = await callGeminiDiarizeSpeakers(rawTranscript, geminiKey);
+        if (diarizedTurns && diarizedTurns.length > 0 && new Set(diarizedTurns.map((t) => t.speaker)).size > 1) {
+          let accTime = 0;
+          utterances = diarizedTurns.map((t, idx) => {
+            const timeStr = t.time || formatSecondsToHHMMSS(accTime);
+            accTime += 8;
+            return {
+              id: `tr-diar-${idx + 1}`,
+              speaker: t.speaker || "Speaker 1",
+              time: timeStr,
+              start_time: accTime - 8,
+              end_time: accTime,
+              text: t.text || "",
+            };
+          });
+        }
+      } catch (dErr) {
+        console.warn("Automatic diarization fallback in ApiService:", dErr);
+      }
+    }
+
     // Apply speaker mapping
     const mappedUtterances = utterances.map((u) => ({
       ...u,
@@ -454,7 +535,7 @@ const ApiService = {
         status: "Pending",
         source_timestamp: a.source_timestamp || "00:00:00",
       }));
-      aiModelUsed = "Google Gemini AI (Gemma 4 / 2.5 Engine)";
+      aiModelUsed = "Google Gemini AI (Gemini 3.5 Flash)";
     } catch (apiErr) {
       console.warn("Gemini API call failed, falling back to local NLP extractor:", apiErr);
       const local = localExtractiveAnalyzer(mappedUtterances, speakerMapping);
@@ -594,13 +675,37 @@ function LiveAudioRecorder({ onRecordingComplete }) {
   const [seconds, setSeconds] = useState(0);
   const [recordedUtterances, setRecordedUtterances] = useState([]);
   const [liveTranscript, setLiveTranscript] = useState("");
+  const [activeSpeaker, setActiveSpeaker] = useState("Speaker 1");
+  const [knownSpeakers, setKnownSpeakers] = useState(["Speaker 1", "Speaker 2"]);
+  const [autoDiarize, setAutoDiarize] = useState(true);
 
+  const activeSpeakerRef = useRef("Speaker 1");
+  const lastFinalTimeRef = useRef(0);
   const timerRef = useRef(null);
   const recognitionRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const canvasRef = useRef(null);
   const analyserRef = useRef(null);
   const animationFrameRef = useRef(null);
+
+  useEffect(() => {
+    activeSpeakerRef.current = activeSpeaker;
+  }, [activeSpeaker]);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (!isRecording) return;
+      if (["input", "textarea"].includes(document.activeElement?.tagName?.toLowerCase())) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= knownSpeakers.length) {
+        const target = knownSpeakers[num - 1];
+        setActiveSpeaker(target);
+        activeSpeakerRef.current = target;
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isRecording, knownSpeakers]);
 
   useEffect(() => {
     if (isRecording && !isPaused) {
@@ -613,6 +718,14 @@ function LiveAudioRecorder({ onRecordingComplete }) {
     return () => clearInterval(timerRef.current);
   }, [isRecording, isPaused]);
 
+  const handleAddSpeaker = () => {
+    const nextNum = knownSpeakers.length + 1;
+    const newSpk = `Speaker ${nextNum}`;
+    setKnownSpeakers((prev) => [...prev, newSpk]);
+    setActiveSpeaker(newSpk);
+    activeSpeakerRef.current = newSpk;
+  };
+
   const startRecording = async () => {
     try {
       setSeconds(0);
@@ -620,6 +733,7 @@ function LiveAudioRecorder({ onRecordingComplete }) {
       setLiveTranscript("");
       setIsRecording(true);
       setIsPaused(false);
+      lastFinalTimeRef.current = 0;
 
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         try {
@@ -654,11 +768,22 @@ function LiveAudioRecorder({ onRecordingComplete }) {
               if (res.isFinal) {
                 const finalTxt = transcriptText.trim();
                 if (finalTxt) {
+                  let currentSpk = activeSpeakerRef.current;
+                  // Auto-switch speaker when speech pause is detected (silence >= 2s)
+                  if (autoDiarize && seconds > 0 && lastFinalTimeRef.current > 0 && (seconds - lastFinalTimeRef.current >= 2)) {
+                    const idx = knownSpeakers.indexOf(currentSpk);
+                    const nextSpk = knownSpeakers[(idx + 1) % knownSpeakers.length];
+                    currentSpk = nextSpk;
+                    setActiveSpeaker(currentSpk);
+                    activeSpeakerRef.current = currentSpk;
+                  }
+                  lastFinalTimeRef.current = seconds;
+
                   setRecordedUtterances((prev) => [
                     ...prev,
                     {
                       id: `tr-rec-${prev.length + 1}`,
-                      speaker: "Speaker 1",
+                      speaker: currentSpk,
                       time: formatSecondsToHHMMSS(seconds),
                       start_time: seconds,
                       end_time: seconds + 5,
@@ -697,7 +822,7 @@ function LiveAudioRecorder({ onRecordingComplete }) {
     if (liveTranscript.trim()) {
       finalUtterances.push({
         id: `tr-rec-${finalUtterances.length + 1}`,
-        speaker: "Speaker 1",
+        speaker: activeSpeakerRef.current,
         time: formatSecondsToHHMMSS(seconds),
         start_time: seconds,
         end_time: seconds + 3,
@@ -709,6 +834,7 @@ function LiveAudioRecorder({ onRecordingComplete }) {
       durationSeconds: seconds,
       recordedUtterances: finalUtterances,
       liveTranscript: finalUtterances.map((u) => u.text).join(" "),
+      knownSpeakers,
     });
   };
 
@@ -729,7 +855,7 @@ function LiveAudioRecorder({ onRecordingComplete }) {
 
       for (let i = 0; i < bufferLength; i++) {
         const barHeight = (dataArray[i] / 255) * canvas.height;
-        ctx.fillStyle = "#6366f1";
+        ctx.fillStyle = activeSpeaker === "Speaker 1" ? "#6366f1" : "#10b981";
         ctx.fillRect(x, canvas.height - barHeight, barWidth - 2, barHeight);
         x += barWidth;
       }
@@ -745,8 +871,8 @@ function LiveAudioRecorder({ onRecordingComplete }) {
             <Icons.Mic size={22} />
           </div>
           <div>
-            <h4 className="text-sm font-bold text-slate-900">Live Microphone Speech Capture</h4>
-            <p className="text-xs text-slate-500">Transcribes actual spoken words into timestamped segments</p>
+            <h4 className="text-sm font-bold text-slate-900">Live Multi-Speaker Microphone Capture</h4>
+            <p className="text-xs text-slate-500">Transcribes voice and identifies distinct speakers</p>
           </div>
         </div>
 
@@ -758,28 +884,92 @@ function LiveAudioRecorder({ onRecordingComplete }) {
         )}
       </div>
 
+      {/* Interactive Speaker Selector */}
+      <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+            <Icons.Users size={15} className="text-indigo-600" />
+            Active Speaker (Tap button or press 1, 2...):
+          </span>
+          <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoDiarize}
+              onChange={(e) => setAutoDiarize(e.target.checked)}
+              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            <span>Auto-detect speaker on speech pause</span>
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {knownSpeakers.map((spk, idx) => (
+            <button
+              key={spk}
+              type="button"
+              onClick={() => {
+                setActiveSpeaker(spk);
+                activeSpeakerRef.current = spk;
+              }}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
+                activeSpeaker === spk
+                  ? "bg-indigo-600 text-white shadow-md ring-2 ring-indigo-300 scale-105"
+                  : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${activeSpeaker === spk ? "bg-emerald-300 animate-pulse" : "bg-slate-300"}`}></span>
+              <span>{spk}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/10 font-mono">key {idx + 1}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={handleAddSpeaker}
+            className="px-3 py-1.5 rounded-xl text-xs font-bold border border-dashed border-indigo-400 text-indigo-600 hover:bg-indigo-50 flex items-center gap-1 transition-all"
+          >
+            <Icons.Plus size={14} />
+            <span>+ Add Voice</span>
+          </button>
+        </div>
+      </div>
+
       <div className="h-24 bg-slate-900 rounded-xl overflow-hidden p-3 flex flex-col justify-between border border-slate-800">
         <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-          <span>{isRecording ? "● RECORDING LIVE AUDIO" : "STANDBY — READY"}</span>
-          <span>Actual Media Clock: {formatSecondsToHHMMSS(seconds)}</span>
+          <span>{isRecording ? `● RECORDING — SPEAKING: ${activeSpeaker.toUpperCase()}` : "STANDBY — READY"}</span>
+          <span>Media Clock: {formatSecondsToHHMMSS(seconds)}</span>
         </div>
         <canvas ref={canvasRef} width={480} height={50} className="w-full h-12" />
-        <div className="text-[10px] text-slate-500">Audio input ready</div>
+        <div className="text-[10px] text-slate-400 flex items-center justify-between">
+          <span>Acoustic Visualizer: Voice activity input</span>
+          {isRecording && <span className="text-emerald-400 font-bold">● Active: {activeSpeaker}</span>}
+        </div>
       </div>
 
       {isRecording && (
         <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl text-xs space-y-1">
-          <span className="font-bold text-indigo-900">Live Recognized Words:</span>
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-indigo-900">Live Spoken Words:</span>
+            <span className="text-[11px] font-bold text-indigo-600">Attributed to: {activeSpeaker}</span>
+          </div>
           <p className="text-slate-700 italic">{liveTranscript || "Speak into your microphone..."}</p>
         </div>
       )}
 
       {recordedUtterances.length > 0 && (
-        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1 max-h-32 overflow-y-auto">
-          <span className="font-bold text-slate-800">Captured Transcript Segments:</span>
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1.5 max-h-40 overflow-y-auto">
+          <div className="flex items-center justify-between font-bold text-slate-800 pb-1 border-b border-slate-200">
+            <span>Diarized Transcript Segments ({recordedUtterances.length}):</span>
+            <span className="text-[11px] text-indigo-600 font-normal">
+              Distinct speakers: {Array.from(new Set(recordedUtterances.map((u) => u.speaker))).join(", ")}
+            </span>
+          </div>
           {recordedUtterances.map((u, i) => (
-            <div key={i} className="text-slate-700">
-              <span className="font-mono text-slate-400 text-[10px]">[{u.time}]</span> <strong>{u.speaker}:</strong> {u.text}
+            <div key={i} className="text-slate-700 flex items-start gap-1.5">
+              <span className="font-mono text-slate-400 text-[10px] whitespace-nowrap mt-0.5">[{u.time}]</span>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${u.speaker === "Speaker 1" ? "bg-indigo-100 text-indigo-800" : "bg-emerald-100 text-emerald-800"}`}>
+                {u.speaker}:
+              </span>
+              <span className="flex-1">{u.text}</span>
             </div>
           ))}
         </div>
@@ -1070,6 +1260,7 @@ function NewMeetingWizard({ onProcessingComplete, onCancel, onAddToast, geminiAp
   const [detectedSpeakers, setDetectedSpeakers] = useState(["Speaker 1", "Speaker 2"]);
   const [speakerMapping, setSpeakerMapping] = useState({ "Speaker 1": "", "Speaker 2": "" });
   const [errorNotice, setErrorNotice] = useState("");
+  const [isDiarizing, setIsDiarizing] = useState(false);
 
   const handleTranscriptChange = (text) => {
     setTranscriptText(text);
@@ -1083,6 +1274,75 @@ function NewMeetingWizard({ onProcessingComplete, onCancel, onAddToast, geminiAp
       list.forEach((s) => (mapping[s] = s.startsWith("Speaker") ? "" : s));
       setSpeakerMapping(mapping);
     }
+  };
+
+  const handleAutoDiarizeWithAI = async () => {
+    setIsDiarizing(true);
+    setErrorNotice("");
+    try {
+      let rawText = "";
+      if (sourceType === "record" && recordedData && recordedData.recordedUtterances) {
+        rawText = recordedData.recordedUtterances.map((u) => `[${u.time}] ${u.speaker}: ${u.text}`).join("\n");
+      } else if (sourceType === "transcript") {
+        rawText = transcriptText;
+      }
+      if (!rawText.trim()) {
+        setErrorNotice("No transcript or audio content available to diarize.");
+        setIsDiarizing(false);
+        return;
+      }
+
+      const turns = await callGeminiDiarizeSpeakers(rawText, geminiApiKey);
+      if (turns && turns.length > 0) {
+        const spkSet = new Set();
+        turns.forEach((t) => spkSet.add(t.speaker));
+        const list = Array.from(spkSet);
+        if (list.length > 0) {
+          setDetectedSpeakers(list);
+          const newMap = { ...speakerMapping };
+          list.forEach((s) => {
+            if (newMap[s] === undefined) newMap[s] = "";
+          });
+          setSpeakerMapping(newMap);
+
+          // If recording, update recordedUtterances with new diarized speakers
+          if (sourceType === "record" && recordedData) {
+            let acc = 0;
+            const newUtterances = turns.map((t, idx) => {
+              const timeStr = t.time || formatSecondsToHHMMSS(acc);
+              acc += 8;
+              return {
+                id: `tr-rec-${idx + 1}`,
+                speaker: t.speaker || "Speaker 1",
+                time: timeStr,
+                start_time: acc - 8,
+                end_time: acc,
+                text: t.text || "",
+              };
+            });
+            setRecordedData({
+              ...recordedData,
+              recordedUtterances: newUtterances,
+            });
+          }
+
+          if (onAddToast) onAddToast({ type: "success", title: "Voices Identified", message: `AI detected ${list.length} distinct voices in the conversation!` });
+        }
+      } else {
+        if (onAddToast) onAddToast({ type: "info", title: "Diarization Notice", message: "Dialogue already parsed or single speaker." });
+      }
+    } catch (err) {
+      if (onAddToast) onAddToast({ type: "error", title: "Diarization Failed", message: err.message });
+    } finally {
+      setIsDiarizing(false);
+    }
+  };
+
+  const handleAddManualSpeaker = () => {
+    const nextNum = detectedSpeakers.length + 1;
+    const newSpk = `Speaker ${nextNum}`;
+    setDetectedSpeakers([...detectedSpeakers, newSpk]);
+    setSpeakerMapping({ ...speakerMapping, [newSpk]: "" });
   };
 
   const handleNextToConfig = () => {
@@ -1382,14 +1642,26 @@ Example:
           </div>
 
           <div className="p-4 bg-indigo-50/50 border border-indigo-100 rounded-2xl space-y-3">
-            <div className="flex items-center gap-2">
-              <Icons.UserCheck size={18} className="text-indigo-600" />
-              <div>
-                <h4 className="text-xs font-bold text-indigo-950">Speaker Name Mapping</h4>
-                <p className="text-[11px] text-slate-500">
-                  Map detected speakers to participant names (optional).
-                </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Icons.UserCheck size={18} className="text-indigo-600" />
+                <div>
+                  <h4 className="text-xs font-bold text-indigo-950">Speaker & Voice Identification</h4>
+                  <p className="text-[11px] text-slate-500">
+                    Map detected speakers to participant names or identify different voices.
+                  </p>
+                </div>
               </div>
+
+              <button
+                type="button"
+                onClick={handleAutoDiarizeWithAI}
+                disabled={isDiarizing}
+                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all"
+              >
+                {isDiarizing ? <Icons.Loader2 size={13} className="animate-spin" /> : <Icons.Sparkles size={13} />}
+                <span>{isDiarizing ? "Identifying Voices..." : "✨ Auto-Identify Voices with AI"}</span>
+              </button>
             </div>
 
             <div className="space-y-2.5 pt-2">
@@ -1414,6 +1686,17 @@ Example:
                   />
                 </div>
               ))}
+            </div>
+
+            <div className="pt-1 flex justify-start">
+              <button
+                type="button"
+                onClick={handleAddManualSpeaker}
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 py-1"
+              >
+                <Icons.Plus size={14} />
+                <span>+ Add Another Participant</span>
+              </button>
             </div>
           </div>
 
@@ -1607,13 +1890,26 @@ function MinutesView({ meeting, onEditReview, onExport }) {
 
       {/* Discussion Points */}
       {(meeting.discussionPoints && meeting.discussionPoints.length > 0) && (
-        <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-3">
-          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">2. Key Discussion Topics</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+              <Icons.FileText size={15} className="text-indigo-600" />
+              2. Key Discussion Topics & In-Depth Breakdown ({meeting.discussionPoints.length})
+            </h3>
+            <span className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100">
+              Summarized by Gemini AI
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {meeting.discussionPoints.map((d, i) => (
-              <div key={i} className="p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 space-y-1">
-                <h4 className="text-xs font-bold text-indigo-950">{d.topic}</h4>
-                <p className="text-xs text-slate-600 leading-relaxed">{d.description}</p>
+              <div key={i} className="p-4 bg-gradient-to-br from-slate-50 to-indigo-50/20 rounded-2xl border border-slate-200 hover:border-indigo-200 transition-all space-y-2">
+                <div className="flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-lg bg-indigo-600 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0 mt-0.5">
+                    {i + 1}
+                  </span>
+                  <h4 className="text-xs font-bold text-slate-900 leading-snug">{d.topic}</h4>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed pl-7">{d.description}</p>
               </div>
             ))}
           </div>

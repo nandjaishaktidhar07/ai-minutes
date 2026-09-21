@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ai-meeting-minutes
+    runtime: python
+    buildCommand: echo "No build step needed"
+    startCommand: python backend.py
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false   # You will paste your key in the Render dashboard

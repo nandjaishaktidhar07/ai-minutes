@@ -1,16 +1,11 @@
 import json
-import mimetypes
 import os
 import re
 import urllib.request
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pathlib import Path
 
-# Directory where index.html and app.js live (same folder as this script)
-STATIC_DIR = Path(__file__).parent
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6LV8gWDK_WmQjAY7rbqdYigLSNX1qMSpFE6P5CSVe_3gw")
 
 # In-memory storage for real saved meetings
 SAVED_MEETINGS = []
@@ -128,21 +123,14 @@ def parse_transcript_text(raw_text):
 
 
 class GeminiMeetingSummarizer:
-    CANDIDATE_MODELS = [
-        "models/gemini-3.5-flash",
-        "models/gemini-3-flash-preview",
-        "models/gemini-3.7-flash",
-        "models/gemini-flash-latest"
-    ]
-
     @classmethod
     def call_gemini(cls, transcript_text, meeting_title, participants, api_key=None):
         key = api_key or GEMINI_API_KEY
-        if not key:
-            raise ValueError("No Gemini API key provided.")
+        model_name = "models/gemma-4-26b-a4b-it"
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={key}"
 
-        prompt = f"""You are an expert AI meeting documentation analyst.
-Analyze the following timestamped meeting transcript and generate thorough, structured meeting minutes strictly based on the spoken conversation.
+        prompt = f"""You are an expert meeting documentation AI.
+Analyze the following timestamped meeting transcript and generate structured minutes strictly from the conversation.
 
 Meeting Title: {meeting_title}
 Participants: {', '.join(participants)}
@@ -150,101 +138,38 @@ Participants: {', '.join(participants)}
 Transcript:
 {transcript_text}
 
-CRITICAL REQUIREMENTS:
-1. "summary": A cohesive, high-level executive summary paragraph capturing the meeting context and main outcomes.
-2. "discussionPoints": Extract EVERY distinct topic discussed as a separate object. For each topic, provide a descriptive, specific title in "topic", and in "description" provide a detailed, multi-sentence summary with concrete facts, arguments, proposals, and considerations. DO NOT just repeat or rephrase the executive summary.
-3. "decisions": Array of concrete decisions agreed upon or confirmed during the meeting.
-4. "actionItems": Array of specific actionable tasks with owner, deadline, priority (High/Medium/Low), and source_timestamp.
-
-Return strictly valid JSON matching this schema:
+Respond strictly with valid JSON inside ```json ... ```:
 {{
-  "summary": "Executive summary paragraph...",
+  "summary": "Executive summary paragraph based strictly on the discussion",
   "discussionPoints": [
-    {{"topic": "Specific Topic Heading", "description": "Detailed discussion breakdown, context, and findings..."}}
+    {{"topic": "Topic Heading", "description": "Details discussed"}}
   ],
   "decisions": [
-    "Decision confirmed during meeting..."
+    "Decision made during meeting"
   ],
   "actionItems": [
-    {{"task": "Task description", "owner": "Owner or Speaker name", "deadline": "Deadline or Not specified", "priority": "High/Medium/Low", "source_timestamp": "HH:MM:SS"}}
+    {{"task": "Task description", "owner": "Speaker or participant name or Unassigned", "deadline": "Date/Day or Not specified", "priority": "High/Medium/Low", "source_timestamp": "HH:MM:SS"}}
   ]
 }}"""
 
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "response_mime_type": "application/json"
-            }
-        }
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
 
-        last_error = None
-        for model in cls.CANDIDATE_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model}:generateContent?key={key}"
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-                    return json.loads(raw_text)
-            except Exception as e:
-                last_error = e
-                print(f"Model {model} failed in summarization: {e}")
-
-        raise last_error or RuntimeError("All Gemini models failed.")
-
-    @classmethod
-    def diarize_speakers(cls, transcript_or_utterances, api_key=None):
-        key = api_key or GEMINI_API_KEY
-        if not key:
-            raise ValueError("No Gemini API key provided.")
-
-        if isinstance(transcript_or_utterances, list):
-            raw_text = "\n".join([f"[{u.get('time', '00:00:00')}] {u.get('speaker', 'Speaker 1')}: {u.get('text', '')}" for u in transcript_or_utterances])
-        else:
-            raw_text = str(transcript_or_utterances)
-
-        prompt = f"""You are an expert conversation and speech diarization AI.
-Below is a raw meeting transcript where speakers may be incorrectly labeled or merged under a single speaker:
-
-{raw_text}
-
-Analyze the dialogue patterns, conversational flow, questions, responses, greetings, agreement, and distinct voice perspectives.
-Separate the transcript into distinct speakers (Speaker 1, Speaker 2, Speaker 3, etc.).
-Return strictly valid JSON in this format:
-{{
-  "turns": [
-    {{"speaker": "Speaker 1", "text": "Spoken segment...", "time": "HH:MM:SS"}}
-  ]
-}}"""
-
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "response_mime_type": "application/json"
-            }
-        }
-
-        for model in cls.CANDIDATE_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model}:generateContent?key={key}"
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-                    parsed = json.loads(raw_text)
-                    return parsed.get("turns", [])
-            except Exception as e:
-                print(f"Model {model} failed in diarization: {e}")
-
-        return []
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            
+            match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw_text)
+            clean_json = match.group(1) if match else raw_text
+            if not match:
+                match2 = re.search(r"(\{[\s\S]*\})", raw_text)
+                if match2:
+                    clean_json = match2.group(1)
+            return json.loads(clean_json)
 
 
 class RealMeetingProcessor:
@@ -277,29 +202,6 @@ class RealMeetingProcessor:
 
         for u in utterances:
             u["speaker"] = speaker_mapping.get(u["speaker"], u["speaker"])
-
-        # Auto-diarize if only 1 speaker detected but multiple statements exist
-        distinct_speakers = set(u["speaker"] for u in utterances)
-        if len(distinct_speakers) <= 1 and len(utterances) >= 2 and api_key:
-            try:
-                diarized_turns = GeminiMeetingSummarizer.diarize_speakers(utterances, api_key)
-                if diarized_turns and len(set(t.get("speaker") for t in diarized_turns)) > 1:
-                    new_utterances = []
-                    acc = 0
-                    for idx, t in enumerate(diarized_turns):
-                        t_time = t.get("time") or format_seconds_to_hhmmss(acc)
-                        new_utterances.append({
-                            "id": f"tr-ai-{idx+1}",
-                            "speaker": speaker_mapping.get(t.get("speaker"), t.get("speaker", "Speaker 1")),
-                            "time": t_time,
-                            "start_time": acc,
-                            "end_time": acc + 10,
-                            "text": t.get("text", "")
-                        })
-                        acc += 10
-                    utterances = new_utterances
-            except Exception as ex:
-                print("Auto-diarization fallback:", ex)
 
         word_counts = {}
         total_words = 0
@@ -393,47 +295,14 @@ class APIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "meetings": meetings}).encode('utf-8'))
         else:
-            # Serve static frontend files
-            url_path = self.path.split('?')[0]  # strip query string
-            if url_path == '/' or url_path == '':
-                url_path = '/index.html'
-            file_path = STATIC_DIR / url_path.lstrip('/')
-            if file_path.is_file():
-                mime_type, _ = mimetypes.guess_type(str(file_path))
-                mime_type = mime_type or 'application/octet-stream'
-                self.send_response(200)
-                self.send_header('Content-Type', mime_type)
-                self.send_cors_headers()
-                self.end_headers()
-                self.wfile.write(file_path.read_bytes())
-            else:
-                self.send_response(404)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_cors_headers()
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Endpoint not found"}).encode('utf-8'))
 
     def do_POST(self):
-        if self.path in ['/api/diarize']:
-            try:
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length)
-                payload = json.loads(body.decode('utf-8')) if body else {}
-                transcript = payload.get("transcript", "")
-                key = payload.get("gemini_api_key") or GEMINI_API_KEY
-                turns = GeminiMeetingSummarizer.diarize_speakers(transcript, key)
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_cors_headers()
-                self.end_headers()
-                self.wfile.write(json.dumps({"success": True, "turns": turns}).encode('utf-8'))
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_cors_headers()
-                self.end_headers()
-                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
-        elif self.path in ['/api/meeting/process', '/api/generate-minutes']:
+        if self.path in ['/api/meeting/process', '/api/generate-minutes']:
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
                 body = self.rfile.read(content_length)
@@ -467,13 +336,11 @@ class APIHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Endpoint not found"}).encode('utf-8'))
 
 
-def run_server(port=None):
-    if port is None:
-        port = int(os.environ.get('PORT', 5000))
-    server_address = ('0.0.0.0', port)
+def run_server(port=5000):
+    server_address = ('localhost', port)
     httpd = HTTPServer(server_address, APIHandler)
-    print(f"AI Meeting Minutes running on http://0.0.0.0:{port}")
+    print(f"AI Meeting Minutes API running on http://localhost:{port}")
     httpd.serve_forever()
 
 if __name__ == '__main__':
-    run_server()
+    run_server(5000)

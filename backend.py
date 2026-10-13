@@ -3,7 +3,7 @@ import os
 import re
 import urllib.request
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6LV8gWDK_WmQjAY7rbqdYigLSNX1qMSpFE6P5CSVe_3gw")
 
@@ -126,7 +126,7 @@ class GeminiMeetingSummarizer:
     @classmethod
     def call_gemini(cls, transcript_text, meeting_title, participants, api_key=None):
         key = api_key or GEMINI_API_KEY
-        model_name = "models/gemma-4-26b-a4b-it"
+        model_name = "models/gemini-3-flash-preview"
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={key}"
 
         prompt = f"""You are an expert meeting documentation AI.
@@ -274,13 +274,21 @@ class RealMeetingProcessor:
         return meeting_obj
 
 
-class APIHandler(BaseHTTPRequestHandler):
+class APIHandler(SimpleHTTPRequestHandler):
     def send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
     def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_cors_headers()
+        self.end_headers()
+
+    def do_HEAD(self):
+        # Health checks from Render send HEAD /
+        if not self.path.startswith('/api/'):
+            return super().do_HEAD()
         self.send_response(200)
         self.send_cors_headers()
         self.end_headers()
@@ -294,12 +302,15 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "meetings": meetings}).encode('utf-8'))
-        else:
+        elif self.path.startswith('/api/'):
             self.send_response(404)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"error": "Endpoint not found"}).encode('utf-8'))
+        else:
+            # Serve index.html, app.js, and static assets seamlessly
+            return super().do_GET()
 
     def do_POST(self):
         if self.path in ['/api/meeting/process', '/api/generate-minutes']:
@@ -336,11 +347,13 @@ class APIHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Endpoint not found"}).encode('utf-8'))
 
 
-def run_server(port=5000):
-    server_address = ('localhost', port)
+def run_server(port=None):
+    if port is None:
+        port = int(os.environ.get("PORT", 5000))
+    server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, APIHandler)
-    print(f"AI Meeting Minutes API running on http://localhost:{port}")
+    print(f"AI Meeting Minutes API running on http://0.0.0.0:{port}")
     httpd.serve_forever()
 
 if __name__ == '__main__':
-    run_server(5000)
+    run_server()
